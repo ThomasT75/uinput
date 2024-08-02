@@ -271,4 +271,17 @@ const (
 	ButtonDpadRight = 0x223
 
 	ButtonMode = 0x13c // This is the special button that usually bears the Xbox or Playstation logo
+  
+  // Used to Declare force-feedback Capabilities 
+  FFRumble    = 0x50 
+  FFPeriodic  = 0x51 
+  FFConstant  = 0x52
+  FFSpring    = 0x53
+  FFFriction  = 0x54
+  FFDamper    = 0x55
+  FFInertia   = 0x56
+  FFRamp      = 0x57
+
+  ffEffectMin = FFRumble
+  ffEffectMax = FFRamp
 )
