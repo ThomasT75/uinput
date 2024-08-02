@@ -69,6 +69,14 @@ type Gamepad interface {
 	io.Closer
 }
 
+type GamepadWithRumble interface {
+  Gamepad
+  // Call this function periodically to check for force-feedback. 
+  // the callback return will be placed into upload.ReturnValue
+  // it is not an guarante that the callback will be called 
+  ForceFeedbackCallback(callback func(upload *UInputFFUpload, erase *UInputFFErase) int32) error 
+}
+
 type vGamepad struct {
 	name       []byte
 	deviceFile *os.File
@@ -86,7 +94,32 @@ func CreateGamepad(path string, name []byte, vendor uint16, product uint16) (Gam
 		return nil, err
 	}
 
-	fd, err := createVGamepadDevice(path, name, vendor, product)
+	fd, err := createVGamepadDevice(path, name, vendor, product, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	return vGamepad{name: name, deviceFile: fd}, nil
+}
+
+// CreateGamepadWithRumble will create a new gamepad using the given uinput 
+// device path of the uinput device, and will rumble support.
+// Using a gamepad with rumble requires calling ForceFeedbackCallback periodically
+func CreateGamepadWithRumble(path string, name []byte, vendor uint16, product uint16, effectsMax uint32) (GamepadWithRumble, error) { 
+	err := validateDevicePath(path)
+	if err != nil {
+		return nil, err
+	}
+	err = validateUinputName(name)
+	if err != nil {
+		return nil, err
+	}
+
+  if effectsMax < 1 {
+    return nil, fmt.Errorf("effectsMax is below the minimum value of 1, use CreateGamepad if you don't want rumble support")
+  }
+
+	fd, err := createVGamepadDevice(path, name, vendor, product, effectsMax)
 	if err != nil {
 		return nil, err
 	}
@@ -130,12 +163,12 @@ func (vg vGamepad) RightStickMoveY(value float32) error {
 	return vg.sendStickAxisEvent(absRY, value)
 }
 
-func (vg vGamepad) LeftTriggerForce(value float32) error {
-  return vg.sendStickAxisEvent(absZ, value)
-}
+func (vg vGamepad) LeftStickMove(x, y float32) error {
+	values := map[uint16]float32{}
+	values[absX] = x
+	values[absY] = y
 
-func (vg vGamepad) RightTriggerForce(value float32) error {
-  return vg.sendStickAxisEvent(absRZ, value)
+	return vg.sendStickEvent(values)
 }
 
 func (vg vGamepad) RightStickMove(x, y float32) error {
@@ -146,12 +179,12 @@ func (vg vGamepad) RightStickMove(x, y float32) error {
 	return vg.sendStickEvent(values)
 }
 
-func (vg vGamepad) LeftStickMove(x, y float32) error {
-	values := map[uint16]float32{}
-	values[absX] = x
-	values[absY] = y
+func (vg vGamepad) LeftTriggerForce(value float32) error {
+  return vg.sendStickAxisEvent(absZ, value)
+}
 
-	return vg.sendStickEvent(values)
+func (vg vGamepad) RightTriggerForce(value float32) error {
+  return vg.sendStickAxisEvent(absRZ, value)
 }
 
 func (vg vGamepad) HatPress(direction HatDirection) error {
@@ -160,6 +193,10 @@ func (vg vGamepad) HatPress(direction HatDirection) error {
 
 func (vg vGamepad) HatRelease(direction HatDirection) error {
 	return vg.sendHatEvent(direction, Release)
+}
+
+func (vg vGamepad) ForceFeedbackCallback(callback func(upload *UInputFFUpload, erase *UInputFFErase) int32) error {
+  return forceFeedbackCallback(vg.deviceFile, callback)
 }
 
 func (vg vGamepad) sendStickAxisEvent(absCode uint16, value float32) error {
@@ -262,7 +299,7 @@ func (vg vGamepad) Close() error {
 	return closeDevice(vg.deviceFile)
 }
 
-func createVGamepadDevice(path string, name []byte, vendor uint16, product uint16) (fd *os.File, err error) {
+func createVGamepadDevice(path string, name []byte, vendor uint16, product uint16, effMax uint32) (fd *os.File, err error) {
 	// This array is needed to register the event keys for the gamepad device.
 	keys := []uint16{
 		ButtonGamepad,
@@ -301,6 +338,10 @@ func createVGamepadDevice(path string, name []byte, vendor uint16, product uint1
 		absHat0X,
 		absHat0Y,
 	}
+
+  ffEvents := []uint16{
+    FFRumble,
+  }
 
   // tell uinput what the minimum/maximum abs value is
   var absMin [absSize]int32
@@ -358,6 +399,22 @@ func createVGamepadDevice(path string, name []byte, vendor uint16, product uint1
 		}
 	}
 
+  // register force-feedback events
+  if effMax > 0 {
+    err = registerDevice(deviceFile, uintptr(evFF))
+    if err != nil {
+      _ = deviceFile.Close()
+      return nil, fmt.Errorf("failed to register ff event input device: %v", err)
+    }
+    for _, event := range ffEvents {
+      err = ioctl(deviceFile, uiSetFFBit, uintptr(event))
+      if err != nil {
+        _ = deviceFile.Close()
+        return nil, fmt.Errorf("failed to register ff event %v: %v", FFRumble, err)
+      }
+    }
+  }
+
 	return createUsbDevice(deviceFile,
 		uinputUserDev{
 			Name: toUinputName(name),
@@ -367,6 +424,7 @@ func createVGamepadDevice(path string, name []byte, vendor uint16, product uint1
 				Product: product,
 				Version: 1,
       },
+      EffectsMax: effMax,
       Absmin: absMin,
       Absmax: absMax,
     })
