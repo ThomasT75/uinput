@@ -129,7 +129,7 @@ func main() {
 }
 ```
 
-### Using the virutal gamepad device:
+### Using the virtual gamepad device:
 
 ```go 
 package main
@@ -143,8 +143,67 @@ func main() {
         return
     }
     // always do this after the initialization in order to guarantee that the device will be properly closed
-    defer gamepad.close()
+    defer gamepad.Close()
 
+    // press start 
+    gamepad.ButtonPress(uinput.ButtonStart)
+    // hold dpad up then release dpad up
+    gamepad.ButtonDown(uinput.ButtonDpadUp)
+    gamepad.ButtonUp(uinput.ButtonDpadUp)
+    // press right trigger all the way in
+    gamepad.RightTriggerForce(1)
+    // release right trigger
+    gamepad.RightTriggerForce(-1)
+    // move the left stick down
+    gamepad.LeftStickMove(0, 1)
+    // move the right stick to the left
+    gamepad.RightStickMoveX(-1)
+
+    // note: don't use HatPress and HatRelease if you want dpad presses use ButtonDown/Press/Up instead
+}
+```
+
+### Using the virtual gamepad device with rumble:
+
+```go 
+package main
+
+import (
+    "sync"
+    "time"
+
+    "github.com/ThomasT75/uinput"
+)
+
+func main() {
+    // initialization of the gamepad device requires a vendor id and a product id
+    // the 5th argument is the number of rumble effects your device can keep in memory (if making a userspace driver)
+    // if making a virtual device just copy this value from the the real device you are trying to simulate or use a non-zero value
+    var gamepadLock sync.Mutex
+    gamepad, err := uinput.CreateGamepadWithRumble("/dev/uinput", []byte("test gamepad"), 0xDEAD, 0xBEEF, 1)
+    if err != nil {
+        return
+    }
+    // always do this after the initialization in order to guarantee that the device will be properly closed
+    defer gamepad.Close()
+
+    // ForceFeedbackCallback needs to run periodicaly to be able to see new events 
+    // in this example we use a go routine
+    go func(){
+        for {
+            // this function will block so you don't really need to wait between calls
+            gamepad.ForceFeedbackCallback(func(upload *uinput.UInputFFUpload, erase *uinput.UInputFFErase) int32 {
+                if upload != nil {
+                    // do something with upload
+                }
+                if erase != nil {
+                    // do something with erase
+                }
+                return 0 // return value will be placed in upload/erase.ReturnValue
+            })
+        }
+    }()
+        
     // press start 
     gamepad.ButtonPress(uinput.ButtonStart)
     // hold dpad up then release dpad up
@@ -259,6 +318,10 @@ Options to improve compatibility with newer systems are being evaluated. Thanks 
 2024-04-13: Release 1.8.0 adds 2 new functions in gamepad.go for trigger force (one for each trigger) 
 
 2024-04-13: Release 1.8.1 fix missing absMin and absMax (might break API result but can't test it)
+
+2024-08-02: Release 1.9.0 adds Rumble support for gamepad.go follow the example for more info
+and the bulk of force-feedback code is implemented in uinput.go
+so it is as easy as it gets to add this feature to other devices 
 
 TODO
 ----
