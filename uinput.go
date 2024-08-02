@@ -110,7 +110,8 @@ func toUinputName(name []byte) (uinputName [uinputMaxNameSize]byte) {
 }
 
 func createDeviceFile(path string) (fd *os.File, err error) {
-	deviceFile, err := os.OpenFile(path, syscall.O_WRONLY|syscall.O_NONBLOCK, 0660)
+  // Needs to be read and write for force-feedback support
+	deviceFile, err := os.OpenFile(path, syscall.O_RDWR|syscall.O_NONBLOCK, 0660) 
 	if err != nil {
 		return nil, errors.New("could not open device file")
 	}
@@ -196,6 +197,104 @@ func sendBtnEvent(deviceFile *os.File, keys []int, btnState int) (err error) {
 	return syncEvents(deviceFile)
 }
 
+// Currently only used for force-feedback support
+// if the above is no longer true the code will need to change
+// to allow for consuming events in multiple places
+//
+// if nothing was read and no errors occoured both returns will be nil
+func readEvent(deviceFile *os.File) (*inputEvent, error) {
+  var err error
+  buf := make([]byte, 24)
+  n, err := deviceFile.Read(buf)
+  if err != nil {
+    return nil, fmt.Errorf("reading input event from device file failed: %v", err)
+  }
+  if n == 0 {
+    return nil, nil
+  }
+  iev, err := inputEventFromBuffer(buf) 
+
+  if err != nil {
+    return nil, fmt.Errorf("device file read failed on input event from buffer: %v", err)
+  }
+  return iev, nil
+}
+
+// Expose this function in your device for force-feedback support
+// you only need this function if on device creation uinputUserDev.EffectMax is > 0 
+// this function blocks* 
+// the callback return will be placed into upload.ReturnValue
+//
+// Note on blocking: 
+// if for some reason this function doesn't block it will return nil 
+// and the callback will not be called but it is not a error state 
+// on my machine i got mixed results while testing. this is likely caused by 
+// this lib using a old version of go.
+//
+// IMPORTANT:
+// on some old kernel versions telling you support force-feedback without 
+// handling the callback it will hang 
+// on newer versions the callback will timeout after 30 seconds without a hang
+// so on device creation give the option to add force-feedback support
+// 
+// Read linux/uinput.h for how this callback works
+func forceFeedbackCallback(deviceFile *os.File, callback func(upload *UInputFFUpload, erase *UInputFFErase) int32) error {
+  var err error
+  var ie *inputEvent = nil
+
+  // readEvent should block but I got mixed results 
+  // leaving like this because in the case it doesn't block
+  // the user can deal with it better 
+  // 
+  // try to read an event
+  ie, err = readEvent(deviceFile)
+  if err != nil {
+    return err
+  }
+
+  // return early in case of no events
+  if ie == nil {
+    return nil
+  }
+
+  // not on my watch
+  if callback == nil {
+    return fmt.Errorf("callback was nil")
+  }
+
+  // only handle the events we care about
+  if ie.Type == evUinput {
+    switch ie.Code {
+    case uiFFUpload:
+      var ffUp = UInputFFUpload{}
+      ffUp.RequestID = uint32(ie.Value)
+      err = ioctl(deviceFile, uiBeginFFUpload, uintptr(unsafe.Pointer(&ffUp)))
+      if err != nil {
+        return fmt.Errorf("begin ff upload ioctl failed: %v", err)
+      }
+      ffUp.ReturnValue = callback(&ffUp, nil)
+      err = ioctl(deviceFile, uiEndFFUpload, uintptr(unsafe.Pointer(&ffUp)))
+      if err != nil {
+        return fmt.Errorf("end ff upload ioctl failed: %v", err)
+      }
+    case uiFFErase:
+      var ffErs = UInputFFErase{}
+      ffErs.RequestID = uint32(ie.Value)
+      err = ioctl(deviceFile, uiBeginFFErase, uintptr(unsafe.Pointer(&ffErs)))
+      if err != nil {
+        return fmt.Errorf("begin ff erase ioctl failed: %v", err)
+      }
+      ffErs.ReturnValue = callback(nil, &ffErs)
+      err = ioctl(deviceFile, uiEndFFErase, uintptr(unsafe.Pointer(&ffErs)))
+      if err != nil {
+        return fmt.Errorf("end ff erase ioctl failed: %v", err)
+      }
+    }
+  }
+
+  return nil
+}
+
 func syncEvents(deviceFile *os.File) (err error) {
 	buf, err := inputEventToBuffer(inputEvent{
 		Time:  syscall.Timeval{Sec: 0, Usec: 0},
@@ -216,6 +315,19 @@ func inputEventToBuffer(iev inputEvent) (buffer []byte, err error) {
 		return nil, fmt.Errorf("failed to write input event to buffer: %v", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// make sure the buffer capacity is 24
+// and don't use buffer after this
+func inputEventFromBuffer(buffer []byte) (_ *inputEvent, err error) {
+	buf := bytes.NewBuffer(buffer)
+  iev := inputEvent{}
+	err = binary.Read(buf, binary.LittleEndian, &iev)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read buffer to input event: %v", err)
+	}
+	return &iev, nil
+
 }
 
 // original function taken from: https://github.com/tianon/debian-golang-pty/blob/master/ioctl.go
